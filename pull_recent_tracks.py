@@ -1,10 +1,11 @@
-import pandas as pd
+#%% import pandas as pd
 import json
+import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 from spotify_data_collection import data, sp
-from spotify_helper_funs import  get_song_info, write_to_supabase, CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, supabase, read_from_supabase
+from spotify_helper_funs import  get_song_info, write_to_supabase, CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, supabase, read_from_supabase, get_songs_on_playlist
 from playlist_builder import update_playlist
 
 print('Running at', datetime.now())
@@ -20,7 +21,12 @@ res_df = pd.DataFrame([{
     'master_metadata_track_name': item['track']['name'],
     'type': item['track']['type'],
     'time_added': datetime.now().isoformat()
-} for item in results['items']])
+} for item in results['items']])\
+.merge(data.drop_duplicates(subset=['spotify_track_uri']).groupby('spotify_track_uri', as_index = False).agg(artist = ('master_metadata_album_artist_name', 'first')), on = 'spotify_track_uri', how = 'left')\
+.assign(master_metadata_album_artist_name = lambda x: np.where(x['artist'].notna() & (x['master_metadata_album_artist_name'] != x['artist']), x['artist'], x['master_metadata_album_artist_name']))\
+.drop(columns = ['artist'])
+
+
 
 latest_timestamp = supabase.table('SpotifyStreams').select("ts").order('ts', desc=True).limit(1).execute().data[0]['ts']
 
@@ -70,34 +76,43 @@ subscriptions = subscriptions[subscriptions['refresh'] == 'hourly']
 
 if len(subscriptions[(subscriptions['playlist_type'] == 'LikedSongsMultiBands') & (subscriptions['refresh'] == 'hourly')]) > 0:
     artists_with_new_liked_songs = np.unique(saved_tracks_df['artist'])
-    subscriptions_to_update = subscriptions[subscriptions['band_list'].str.contains('|'.join(artists_with_new_liked_songs))]
-    if len(subscriptions_to_update) > 0:
-        for sub in range(len(subscriptions_to_update)):
-            this_sub = subscriptions_to_update.iloc[[sub]]
-            artists_this_sub = this_sub['band_list'].str.split('|')[0]
-            update_playlist(subscription_id = this_sub['id'][0],
-                            new_songs = saved_tracks_df[saved_tracks_df['artist'].isin(artists_this_sub)]['uri'], remove = False)
-
+    if len(artists_with_new_liked_songs) > 0:
+        subscriptions_to_update = subscriptions[subscriptions['param_list'].str.contains('|'.join(artists_with_new_liked_songs))]
+        if len(subscriptions_to_update) > 0:
+            for sub in range(len(subscriptions_to_update)):
+                this_sub = subscriptions_to_update.iloc[[sub]]
+                artists_this_sub = this_sub['param_list'].str.split('|')
+                update_playlist(subscription_id = this_sub['id'][0],
+                                new_songs = saved_tracks_df[saved_tracks_df['artist'].isin(artists_this_sub)]['uri'], 
+                                sp = sp,
+                                remove = False)
+                
+if len(subscriptions[(subscriptions['playlist_type'] == 'CombinePlaylists') & (subscriptions['refresh'] == 'hourly')]) > 0:
+    subscriptions_to_consider= subscriptions[subscriptions['playlist_type'] == 'CombinePlaylists']
+    for s_indx in range(len(subscriptions_to_consider)):
+        sub = subscriptions_to_consider.iloc[[s_indx]]
+        songs_in_combined_playlist = get_songs_on_playlist(sub['playlist_id'].iloc[0], sp)['uri']
+        total_individual_playlists_song_list = []
+        for p in sub['param_list'].str.split('|').iloc[0]:
+            songs_in_this_playlist = get_songs_on_playlist(p, sp)['uri']
+            total_individual_playlists_song_list.extend(songs_in_this_playlist)
+        if len(set(total_individual_playlists_song_list) - set(songs_in_combined_playlist)) +\
+            len(set(songs_in_combined_playlist) - set(total_individual_playlists_song_list)) > 0:
+            update_playlist(subscription_id = sub['id'].iloc[0],
+                            new_songs = total_individual_playlists_song_list, 
+                            sp = sp,
+                            remove = True)
+            
 #song info:
-#%%
-# recent_streams = read_from_supabase(table_name = 'SpotifyStreams', chunk_size = 1000).drop(columns = ['time_added','type'])
-
-# json_path = Path('/Users/izzybeers/Documents/spotify_project/data')
-# print(f"Cron woke up in: {Path.cwd()}")
-
-# extended_data = pd.DataFrame()
-# for file in sorted(json_path.rglob('*.json')):
-#     with open(file, 'r') as data_file:
-#         extended_data = pd.concat([extended_data, pd.DataFrame(json.load(data_file))], axis = 0)
-# data = pd.concat([extended_data,recent_streams], axis = 0)
 
 uris_already_pulled = read_from_supabase(table_name = 'SpotifySongInfo',
                                          select = 'added_at, uri',
                                          chunk_size = 1000)
 
-print(f"Last time the spotify song info has been pulled:", max(pd.to_datetime(uris_already_pulled['added_at'])))
+last_time_run = max(pd.to_datetime(uris_already_pulled['added_at']))
+print(f"Last time the spotify song info has been pulled: {last_time_run}")
 
-uris_to_add_now  = data[~(data['spotify_track_uri'].isin(uris_already_pulled['uri']))]['spotify_track_uri'].unique()[0:100]
+uris_to_add_now  = data[~(data['spotify_track_uri'].isin(uris_already_pulled['uri']))]['spotify_track_uri'].unique()[0:10]
 
 # print(f"{len(recent_streams)} number of recent streams")
 # print(f"{len(extended_data)} rows in main data")
