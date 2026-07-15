@@ -4,17 +4,19 @@ import numpy as np
 import os
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth, CacheFileHandler
 from supabase import create_client, Client
 from spotify_helper_funs import get_song_info, write_to_supabase, read_from_supabase
 
-CLIENT_ID = "4e8269446f474d3f920be9dfa56086d5"
-CLIENT_SECRET = "69f0f2b62b924d458d14a45a526cd5ed"
-REDIRECT_URI = "http://127.0.0.1:9090/callback" # Must match your Spotify Dashboard
+load_dotenv()
 
-supabase_api_key = 'sb_publishable_CRS7gXJPt2eGRZ2QyfMHWQ_tFqFZcSj'
-supabase_endpoint= 'https://vciwmitbqbfjcrrxgcmb.supabase.co'
+CLIENT_ID = os.getenv('CLIENT_ID')
+CLIENT_SECRET = os.getenv('CLIENT_SECRET')
+REDIRECT_URI = os.getenv('REDIRECT_URI')
+supabase_api_key = os.getenv('supabase_api_key')
+supabase_endpoint = os.getenv('supabase_endpoint')
 supabase: Client = create_client(supabase_endpoint, supabase_api_key)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
