@@ -4,18 +4,19 @@ from datetime import datetime
 import os
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+from dotenv import load_dotenv
 
-supabase_api_key = 'sb_publishable_CRS7gXJPt2eGRZ2QyfMHWQ_tFqFZcSj'
-supabase_endpoint= 'https://vciwmitbqbfjcrrxgcmb.supabase.co'
+load_dotenv()
+supabase_api_key = os.getenv('supabase_api_key')
+supabase_endpoint = os.getenv('supabase_endpoint')
 supabase: Client = create_client(supabase_endpoint, supabase_api_key)
-CLIENT_ID = "4e8269446f474d3f920be9dfa56086d5"
-CLIENT_SECRET = "69f0f2b62b924d458d14a45a526cd5ed"
-REDIRECT_URI = "http://127.0.0.1:9090/callback" # Must match your Spotify Dashboard
+CLIENT_ID = os.getenv('CLIENT_ID')
+CLIENT_SECRET = os.getenv('CLIENT_SECRET')
+REDIRECT_URI = os.getenv('REDIRECT_URI')
 
 def get_song_info(uri_list, sp):
     all_track_info = pd.DataFrame()
     for song in uri_list:
-        print(song)
         track = sp.track(song)
         track_info = pd.DataFrame({
             'uri': [song],
@@ -126,3 +127,9 @@ def get_songs_on_playlist(playlist_id, sp):
         else:
             break
     return songs_on_playlist
+
+def filter_liked_songs_to_artist(liked_songs, band_list):
+    return liked_songs[liked_songs['artist'].isin(band_list)]\
+        .assign(display_name = lambda x: x['artist'] + '-' + x['track'])\
+        .sort_values(by='added_at', ascending=False)\
+        .drop_duplicates(subset='display_name', keep='first')['uri']
