@@ -3,11 +3,12 @@ import json
 import pandas as pd
 import random
 import numpy as np
+from IPython.core.debugger import set_trace
 import os
 import time
 from pathlib import Path
-from datetime import datetime
-from spotify_helper_funs import get_song_info, write_to_supabase, update_supabase_rows, read_from_supabase, get_followed_playlists, get_songs_on_playlist
+from datetime import datetime, date
+from spotify_helper_funs import get_song_info, write_to_supabase, update_supabase_rows, read_from_supabase, get_followed_playlists, get_songs_on_playlist, filter_liked_songs_to_artist
 from spotify_data_collection import data, sp, supabase, liked_songs
 
 #%%
@@ -15,7 +16,7 @@ from spotify_data_collection import data, sp, supabase, liked_songs
 #%%
 subscriptions = read_from_supabase(table_name = 'PlaylistSubscriptions')
 
-def name_playlist(playlist_type, band_list = None, n = None, combine_playlists = None):
+def name_playlist(playlist_type, band_list = None, n = None, combine_playlists = None, time_range=None):
     if playlist_type ==  'LikedSongsMultiBands':
         if band_list is None:
             print('Error: band_list must be provided for playlist type LikedSongsMultiBands')
@@ -34,27 +35,49 @@ def name_playlist(playlist_type, band_list = None, n = None, combine_playlists =
             print('Error: band_list must be provided for playlist type LikedSongsMultiBands')
         else:
             name = f"Top {n} songs from {', '.join(band_list[0:3])}{' and more' if len(band_list) > 3 else ''}"
-            description = f"Top {n} songs from {', '.join(band_list)}"
+            description = f"Top {n} songs from {', '.join(band_list)} ({'All-Time' if time_range == 'alltime' else 'Past Year'})"
     return [name, description]
 
-def add_new_playlist(playlist_type, public, user_id, user_name, refresh, liked_songs = None, band_list = None, n = None, combine_playlists = None):
+def top_n_songs_by_band(song_list, band_list, n, time_range):
+    if time_range == 'alltime':
+        songs_to_add = song_list[song_list['artist'].isin(band_list)]\
+        .assign(num_streams = lambda x: x.groupby(['artist','track'])['uri'].transform('size'))\
+        .drop_duplicates(subset = ['artist','track'], keep = 'first')\
+            .assign(display_name = lambda x: x['artist'] +  '-' + x['track'],
+                    rank_streams = lambda x: x.groupby('artist')['num_streams'].rank(method = 'first', ascending = False))\
+                    .query("rank_streams <= @n")['uri']
+    elif time_range == 'year':
+        songs_to_add = song_list[(song_list['artist'].isin(band_list)) & (song_list['ts'] >= pd.Timestamp.now(tz='UTC') - pd.DateOffset(years=1))]\
+            .assign(num_streams = lambda x: x.groupby(['artist','track'])['uri'].transform('size'))\
+            .drop_duplicates(subset = ['artist','track'], keep = 'first')\
+                .assign(display_name = lambda x: x['artist'] +  '-' + x['track'],
+                        rank_streams = lambda x: x.groupby('artist')['num_streams'].rank(method = 'first', ascending = False))\
+                        .query("rank_streams <= @n")['uri']
+        if len(songs_to_add) < 10:
+            songs_to_add = song_list[song_list['artist'].isin(band_list)]\
+                .assign(num_streams = lambda x: x.groupby(['artist','track'])['uri'].transform('size'))\
+                .drop_duplicates(subset = ['artist','track'], keep = 'first')\
+                    .assign(display_name = lambda x: x['artist'] +  '-' + x['track'],
+                            rank_streams = lambda x: x.groupby('artist')['num_streams'].rank(method = 'first', ascending = False))\
+                            .query("rank_streams <= @n")['uri']
+    return songs_to_add
+
+def add_new_playlist(playlist_type, public, user_id, user_name, refresh, song_list = None, band_list = None, n = None, time_range = None, combine_playlists = None):
     if playlist_type ==  'LikedSongsMultiBands':
         if band_list is None:
             print('Error: band_list must be provided for playlist type LikedSongsMultiBands')
         else:
             name, description = name_playlist(playlist_type, band_list)
-            param_list = band_list
-            initial_songs_to_add = liked_songs[liked_songs['artist'].isin(band_list)]\
-                .assign(display_name = lambda x: x['artist'] +  '-' + x['track'])\
-                    .sort_values(by = 'added_at', ascending = False)\
-                        .drop_duplicates(subset = 'display_name', keep = 'first')['uri']
+            param_list = '|'.join(band_list)
+            initial_songs_to_add = song_list
+            print(initial_songs_to_add)
     elif playlist_type == 'CombinePlaylists':
         if (combine_playlists is None) | (len(combine_playlists) > 5) | (len(combine_playlists) == 1):
             print('Error: must specify between 2 and 5 playlists to combine.')
         else:
             name, description = name_playlist(playlist_type = playlist_type,
                                               combine_playlists = combine_playlists)
-            param_list = combine_playlists['id']
+            param_list = '|'.join(combine_playlists['id'].tolist())
             initial_songs_to_add = pd.DataFrame()
             for p in combine_playlists['id']:
                 initial_songs_to_add = pd.concat([initial_songs_to_add,
@@ -62,22 +85,16 @@ def add_new_playlist(playlist_type, public, user_id, user_name, refresh, liked_s
             initial_songs_to_add['display_name'] = initial_songs_to_add['artist'] + '-' + initial_songs_to_add['name']
             initial_songs_to_add = initial_songs_to_add.drop_duplicates(subset = 'display_name', keep = 'first').sort_values('artist')['uri']
     elif playlist_type == 'TopSongsMultiBands':
-        if (band_list is None) | (len(band_list) <= 1) | (n is None):
+        if (band_list is None) or (len(band_list) <= 1) or (n is None):
             print('Error: must specify more than one band and a value of n.')
         else:
             name, description = name_playlist(playlist_type = playlist_type,
                                               band_list = band_list,
-                                              n = n)
-            param_list = band_list
-             #defined by top streams:
-            initial_songs_to_add = liked_songs[liked_songs['artist'].isin(band_list)]\
-            .assign(num_streams = lambda x: x.groupby(['artist','track'])['uri'].transform('size'))\
-            .drop_duplicates(subset = ['artist','track'], keep = 'first')\
-                .assign(display_name = lambda x: x['artist'] +  '-' + x['track'],
-                        rank_streams = lambda x: x.groupby('artist')['num_streams'].rank(method = 'first', ascending = False))\
-                        .query("rank_streams <= @n")['uri']
-
-
+                                              n = n,
+                                              time_range = time_range)
+            param_list = '|'.join(band_list) + ';' + str(n) + ';' + time_range
+            #liked_songs is defined by top streams: 
+            initial_songs_to_add = top_n_songs_by_band(song_list, band_list, n, time_range)
     new_playlist = sp.current_user_playlist_create(name = name,
                                                    public = public,
                                                    collaborative = False,
@@ -89,7 +106,7 @@ def add_new_playlist(playlist_type, public, user_id, user_name, refresh, liked_s
         'playlist_type': [playlist_type],
         'playlist_id': [new_playlist['id']],
         'playlist_uri': [new_playlist['uri']],
-        'param_list': ['|'.join(param_list)],
+        'param_list': param_list,
         'created_at': [pd.Timestamp.now(tz='UTC').isoformat()],
         'subscription_updated_at': [pd.Timestamp.now(tz='UTC').isoformat()],
         'playlist_updated_at': [pd.Timestamp.now(tz='UTC').isoformat()],
@@ -161,24 +178,26 @@ def update_subscription_refresh_rate(subscription_id, new_refresh):
                          match_column_value = subscription_id,
                          new_row = {'refresh': new_refresh, 'subscription_updated_at': pd.Timestamp.now(tz='UTC').isoformat()})
     
-def update_subscription_band_list(subscription_id, user_name, new_band_list, liked_songs):
-    liked_songs_from_artists = liked_songs[liked_songs['artist'].isin(new_band_list)]\
-    .assign(display_name = lambda x: x['artist'] +  '-' + x['track'])\
-        .sort_values(by = 'added_at', ascending = False)\
-            .drop_duplicates(subset = 'display_name', keep = 'first')
+def update_subscription_band_list(subscription_id, user_name, new_band_list, song_list, liked_songs_playlist = True, n = None, time_range = None):
+    if liked_songs_playlist:
+        new_param_list = '|'.join(new_band_list)
+        songs_to_update = filter_liked_songs_to_artist(song_list, new_band_list)
+    else:
+        new_param_list = '|'.join(new_band_list) + ';' + str(n) + ';' + time_range
+        songs_to_update = top_n_songs_by_band(song_list, new_band_list, n, time_range)
     playlist_id = read_from_supabase(table_name = 'PlaylistSubscriptions',
                                  select = 'playlist_id',
                                  eq_col_name = 'id',
                                  eq_value = subscription_id).iloc[0]['playlist_id']
-    name, description = name_playlist(playlist_type =  'LikedSongsMultiBands',
-                                      band_list = new_band_list)
+    name, description = name_playlist(playlist_type =  'LikedSongsMultiBands' if liked_songs_playlist else 'TopSongsMultiBands',
+                                      band_list = new_band_list, n = n, time_range = time_range)
     update_supabase_rows(table_name = 'PlaylistSubscriptions',
                             match_column = 'id',
                             match_column_value = subscription_id,
-                            new_row = {'param_list': '|'.join(new_band_list), 'subscription_updated_at': pd.Timestamp.now(tz='UTC').isoformat(), 'description': [user_name + ': ' + name]})
+                            new_row = {'param_list': new_param_list, 'subscription_updated_at': pd.Timestamp.now(tz='UTC').isoformat(), 'Description': f"{user_name}: {name}"})
     sp.playlist_change_details(playlist_id = playlist_id, name = name, description = description)
     update_playlist(subscription_id = subscription_id,
-                    new_songs = liked_songs_from_artists['uri'],
+                    new_songs = songs_to_update,
                     sp = sp,
                     remove = True)
 

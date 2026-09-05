@@ -21,6 +21,7 @@ supabase: Client = create_client(supabase_endpoint, supabase_api_key)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TOKEN_PATH = os.path.join(BASE_DIR, "spotify_token.txt")
+TOKEN_PATH_ALEX = os.path.join(BASE_DIR, "spotify_token_alex.txt")
 
 sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
     client_id=CLIENT_ID,
@@ -34,10 +35,24 @@ sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
     "ugc-image-upload"
 ),
     cache_handler=CacheFileHandler(cache_path=TOKEN_PATH)
-), retries = 0)
+), retries = 3, requests_timeout = 10)
+
+sp_alex = spotipy.Spotify(auth_manager=SpotifyOAuth(
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET,
+    redirect_uri=REDIRECT_URI,
+    scope = (
+    "user-library-read user-library-modify "
+    "playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private "
+    "user-top-read user-read-recently-played "
+    "user-follow-read user-follow-modify "
+    "ugc-image-upload"
+),
+    cache_handler=CacheFileHandler(cache_path=TOKEN_PATH_ALEX)
+), retries = 3, requests_timeout = 10)
 
 
-recent_streams = read_from_supabase(table_name = 'SpotifyStreams', chunk_size = 1000).drop(columns = ['time_added','type'])
+recent_streams = read_from_supabase(table_name = 'SpotifyStreams', chunk_size = 500).drop(columns = ['time_added','type'])
 
 json_path = Path('/Users/izzybeers/Documents/spotify_project/data')
 
@@ -46,15 +61,17 @@ for file in sorted(json_path.rglob('*.json')):
     with open(file, 'r') as data_file:
         data = pd.concat([data, pd.DataFrame(json.load(data_file))], axis = 0)
 data = data.query('ms_played > 60000')
+data['user_name'] = 'Izzy Beers'
+data['user_id'] = '1242292279'
 data = pd.concat([data,recent_streams], axis = 0)
 data['year'] = data['ts'].str.slice(0,4)
 data['year_month'] = data['ts'].str.slice(0,7)
-data['day'] = pd.to_datetime(data['ts'].str.slice(0,10))
-data['ts'] = pd.to_datetime(data['ts'], format='ISO8601', utc = True)
-data['listen_date'] = data['ts'].dt.date
+data['ts'] = pd.to_datetime(data['ts'], format='ISO8601', utc = False)
+data['day'] = pd.to_datetime(data['ts'].astype(str).str.slice(0,10))
+data['listen_date'] = data['ts'].dt.tz_convert('America/New_York').dt.date
 data['display_name'] = data['master_metadata_album_artist_name'] + ' - ' + data['master_metadata_track_name']
 #change this once we have song duration, so it would be min of 60,000ms and 50% of the songs duration (for shorter songs)
 
 
 liked_songs = read_from_supabase(table_name = 'SpotifyLikedSongs',
-                                 chunk_size = 1000)
+                                 chunk_size = 500)
